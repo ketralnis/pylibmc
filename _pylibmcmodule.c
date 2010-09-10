@@ -811,15 +811,13 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
                                    _PylibMC_SetCommand f, char *fname,
                                    pylibmc_mset* msets, size_t nkeys,
                                    size_t min_compress) {
-    PyGILState_STATE gstate;
     memcached_st* mc = self->mc;
     memcached_return rc = MEMCACHED_SUCCESS;
     int pos;
     bool error = false;
     bool allsuccess = true;
 
-    gstate = PyGILState_Ensure();
-    PyGILState_Release(gstate);
+    Py_BEGIN_ALLOW_THREADS;
 
     for (pos=0; pos < nkeys && !error; pos++) {
         pylibmc_mset* mset = &msets[pos];
@@ -833,10 +831,8 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
         size_t compressed_len = 0;
 
         if (min_compress && value_len >= min_compress) {
-            gstate = PyGILState_Ensure();
             _PylibMC_Deflate(value, value_len,
                              &compressed_value, &compressed_len);
-            PyGILState_Release(gstate);
         }
 
         if (compressed_value != NULL) {
@@ -885,7 +881,7 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
 
     } /* end for each mset */
 
-    gstate = PyGILState_Ensure();
+    Py_END_ALLOW_THREADS;
 
     /* We only return the last return value, even for a _multi
        operation, but we do set the success on the mset */
