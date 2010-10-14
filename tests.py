@@ -281,12 +281,30 @@ False
 True
 >>> mc.get('foo')
 'baz'
+>>> foostr, cas = mc.gets('foo')
+>>> foostr
+'baz'
+>>> foostr2, newcas = mc.cas_or_gets('foo', 'quux', 1)
+>>> foostr2 == foostr and newcas == cas
+True
+>>> mc.get('foo')
+'baz'
+>>> mc.cas_or_gets('foo', 'quux', cas)
+True
+>>> mc.delete('foo') and False
+False
+>>> mc.cas_or_gets('foo', 'baz', 1)
+(None, None)
 >>> mc.behaviors['cas'] = False
 >>> mc.gets('foo')
 Traceback (most recent call last):
 ...
 ValueError: gets without cas behavior
 >>> mc.cas('foo', 'bar', 1)
+Traceback (most recent call last):
+...
+ValueError: cas without cas behavior
+>>> mc.cas_or_gets('foo', 'bar', 1)
 Traceback (most recent call last):
 ...
 ValueError: cas without cas behavior
