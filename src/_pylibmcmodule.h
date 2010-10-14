@@ -264,6 +264,7 @@ static void PylibMC_ClientType_dealloc(PylibMC_Client *);
 static int PylibMC_Client_init(PylibMC_Client *, PyObject *, PyObject *);
 static PyObject *PylibMC_Client_get(PylibMC_Client *, PyObject *arg);
 static PyObject *PylibMC_Client_gets(PylibMC_Client *, PyObject *arg);
+static PyObject *PylibMC_Client_cas_or_gets(PylibMC_Client *, PyObject *, PyObject *);
 static PyObject *PylibMC_Client_set(PylibMC_Client *, PyObject *, PyObject *);
 static PyObject *PylibMC_Client_replace(PylibMC_Client *, PyObject *, PyObject *);
 static PyObject *PylibMC_Client_add(PylibMC_Client *, PyObject *, PyObject *);
@@ -332,6 +333,8 @@ static PyMethodDef PylibMC_ClientType_methods[] = {
         "Append data to a key."},
     {"cas", (PyCFunction)PylibMC_Client_cas, METH_VARARGS|METH_KEYWORDS,
         "Attempt to compare-and-store a key by CAS ID."},
+    {"cas_or_gets", (PyCFunction)PylibMC_Client_cas_or_gets, METH_VARARGS|METH_KEYWORDS,
+        "Attempt to compare-and-store a key by CAS ID. Return either True on success or or a tuple of the new current data and CAS ID"},
     {"delete", (PyCFunction)PylibMC_Client_delete, METH_VARARGS,
         "Delete a key."},
     {"incr", (PyCFunction)PylibMC_Client_incr, METH_VARARGS,

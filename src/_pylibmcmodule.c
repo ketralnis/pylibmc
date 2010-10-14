@@ -3,21 +3,21 @@
  *
  * Copyright (c) 2008, Ludvig Ericson
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
- * 
+ *
  *  - Redistributions of source code must retain the above copyright notice,
  *  this list of conditions and the following disclaimer.
- * 
+ *
  *  - Redistributions in binary form must reproduce the above copyright notice,
  *  this list of conditions and the following disclaimer in the documentation
  *  and/or other materials provided with the distribution.
- * 
+ *
  *  - Neither the name of the author nor the names of the contributors may be
  *  used to endorse or promote products derived from this software without
  *  specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -35,6 +35,9 @@
 #ifdef USE_ZLIB
 #  include <zlib.h>
 #  define ZLIB_BUFSZ (1 << 14)
+/* only release the GIL during deflate/inflate if the size of the data
+   is greater than this */
+#  define ZLIB_GIL_RELEASE 256*1024
 /* only callable while holding the GIL */
 #  define _ZLIB_ERR(s, rc) \
   PyErr_Format(PylibMCExc_MemcachedError, "zlib error %d in " s, rc);
@@ -224,6 +227,9 @@ static int _PylibMC_Deflate(char *value, size_t value_len,
     /* FIXME Failures are entirely silent. */
     int rc;
 
+    /* n.b.: this is called wiile *not* holding the GIL, and must not
+       contain Python-API code */
+
     z_stream strm;
     *result = NULL;
     *result_len = 0;
@@ -253,9 +259,7 @@ static int _PylibMC_Deflate(char *value, size_t value_len,
         goto error;
     }
 
-    Py_BEGIN_ALLOW_THREADS;
     rc = deflate((z_streamp)&strm, Z_FINISH);
-    Py_END_ALLOW_THREADS;
 
     if (rc != Z_STREAM_END) {
         _ZLIB_ERR("deflate", rc);
@@ -322,9 +326,14 @@ static PyObject *_PylibMC_Inflate(char *value, size_t size) {
     }
 
     do {
-        Py_BEGIN_ALLOW_THREADS;
-        rc = inflate((z_streamp)&strm, Z_FINISH);
-        Py_END_ALLOW_THREADS;
+        /* only release the GIL for it if it's a really big value */
+        if(size >= ZLIB_GIL_RELEASE) {
+          Py_BEGIN_ALLOW_THREADS;
+          rc = inflate((z_streamp)&strm, Z_FINISH);
+          Py_END_ALLOW_THREADS;
+        } else {
+          rc = inflate((z_streamp)&strm, Z_FINISH);
+        }
 
         switch (rc) {
         case Z_STREAM_END:
@@ -594,6 +603,105 @@ cleanup:
     }
 }
 
+static PyObject *PylibMC_Client_cas_or_gets(PylibMC_Client *self, PyObject *args,
+        PyObject *kwds) {
+    /* try to set a datum with CAS using the given CAS ID. Either
+       return True on success or return a tuple of the current value
+       and CAS ID. This has the benefit that it releases the GIL only
+       once for both operations */
+  PyObject*    key = NULL;
+  uint64_t     cas = 0;
+  PyObject*    value = NULL;
+  unsigned int time = 0;
+  pylibmc_mset mset;
+  PyObject* ret = NULL;
+  memcached_return cas_rc, gets_rc;
+  memcached_result_st results_obj;
+  memcached_result_st *results = NULL;
+
+  if(!memcached_behavior_get(self->mc, MEMCACHED_BEHAVIOR_SUPPORT_CAS)) {
+    PyErr_SetString(PyExc_ValueError, "cas without cas behavior");
+    return NULL;
+  }
+
+  static char *kws[] = { "key", "value", "cas", "time", NULL };
+  if(!PyArg_ParseTupleAndKeywords(args, kwds, "SOL|I", kws,
+                                  &key, &value, &cas, &time)) {
+    return NULL;
+  }
+
+  if(!_PylibMC_SerializeValue(key, NULL, value, time, &mset)) {
+    goto cleanup;
+  }
+
+  Py_BEGIN_ALLOW_THREADS;
+
+  cas_rc = memcached_cas(self->mc,
+                         mset.key, mset.key_len,
+                         mset.value, mset.value_len,
+                         mset.time, mset.flags, cas);
+
+  if(cas_rc == MEMCACHED_DATA_EXISTS || cas_rc == MEMCACHED_NOTFOUND) {
+    /* appease the type system */
+    const char* keys[1];
+    size_t keylengths[1];
+    *keys = mset.key;
+    *keylengths = mset.key_len;
+
+    /* it failed, we have to get the new cas value */
+    gets_rc = memcached_mget(self->mc, keys, keylengths, 1);
+    if (gets_rc == MEMCACHED_SUCCESS) {
+      memcached_result_create(self->mc, &results_obj);
+      /* this will be NULL if the key wasn't found, or
+         memcached_result_st if it was */
+      results = memcached_fetch_result(self->mc, &results_obj, &gets_rc);
+    }
+  }
+
+  Py_END_ALLOW_THREADS;
+
+  if(cas_rc == MEMCACHED_SUCCESS) {
+    /* the initial CAS succeeded */
+    Py_INCREF(Py_True);
+    ret = Py_True;
+  } else if(cas_rc == MEMCACHED_DATA_EXISTS || cas_rc == MEMCACHED_NOTFOUND) {
+    /* the CAS failed */
+    if(gets_rc == MEMCACHED_SUCCESS) {
+      /* the gets succeeded, so we'll need to deserialise and return
+         the result */
+      const char *new_mc_val = memcached_result_value(results);
+      size_t new_val_size = memcached_result_length(results);
+      uint32_t new_flags = memcached_result_flags(results);
+      uint64_t new_cas = memcached_result_cas(results);
+
+      ret = _PylibMC_parse_memcached_value((char *)new_mc_val, new_val_size, new_flags);
+      ret = Py_BuildValue("(NL)", ret, new_cas);
+
+      /* this was only created if the gets succeeded so that's the
+         only case that we need to free it */
+      memcached_result_free(&results_obj);
+    } else if(gets_rc == MEMCACHED_END || gets_rc == MEMCACHED_NOTFOUND) {
+      /* the key wasn't found at all (so where the heck did the user
+         get the CAS ID they sent us?) */
+      ret = Py_BuildValue("(OO)", Py_None, Py_None);
+    } else {
+      /* the CAS failed in the normal fashion but something bad
+         happened during the gets */
+      PylibMC_ErrFromMemcached(self, "memcached_gets", gets_rc);
+    }
+    memcached_quit(self->mc);
+  } else {
+    /* something bad happened on the initial cas */
+    PylibMC_ErrFromMemcached(self, "memcached_cas", cas_rc);
+  }
+
+cleanup:
+  _PylibMC_FreeMset(&mset);
+
+  return ret;
+}
+
+
 static PyObject *_PylibMC_RunSetCommandMulti(PylibMC_Client* self,
         _PylibMC_SetCommand f, char *fname, PyObject* args,
         PyObject* kwds) {
@@ -786,7 +894,7 @@ static int _PylibMC_SerializeValue(PyObject* key_obj,
 
     /* We need to incr our reference here so that it's guaranteed to
        exist while we release the GIL. Even if we fail after this it
-       should be decremeneted by pylib_mset_free */
+       should be decremeneted by pylibmc_mset_free */
     Py_INCREF(key_obj);
     serialized->key_obj = key_obj;
 
@@ -908,10 +1016,15 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
         size_t compressed_len = 0;
 
         if (min_compress && value_len >= min_compress) {
-            Py_BLOCK_THREADS;
-            _PylibMC_Deflate(value, value_len,
-                             &compressed_value, &compressed_len);
-            Py_UNBLOCK_THREADS;
+            if(value_len >= ZLIB_GIL_RELEASE) {
+              Py_BEGIN_ALLOW_THREADS;
+              _PylibMC_Deflate(value, value_len,
+                               &compressed_value, &compressed_len);
+              Py_END_ALLOW_THREADS;
+            } else {
+              _PylibMC_Deflate(value, value_len,
+                               &compressed_value, &compressed_len);
+            }
         }
 
         if (compressed_value != NULL) {
