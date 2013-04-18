@@ -89,7 +89,7 @@ if cmd == "gen-setup":
     open("Setup", "w").write(line + "\n")
     sys.exit(0)
 
-readme_text = open("README.rst", "U").read()
+readme_text = open("README", "U").read()
 version = open("src/pylibmc-version.h", "U").read().strip().split("\"")[1]
 
 setup(name="pylibmc", version=version,

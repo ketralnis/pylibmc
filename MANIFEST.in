@@ -1,6 +1,7 @@
-include README.rst LICENSE MANIFEST.in setup.py setup.cfg runtests.py
-include _pylibmcmodule.c _pylibmcmodule.h pylibmc-version.h
-recursive-include pylibmc *.py
+include README LICENSE MANIFEST.in setup.py setup.cfg
+include src/_pylibmcmodule.c src/_pylibmcmodule.h src/pylibmc-version.h
+recursive-include src pylibmc/*.py
+and make sdist happy by renaming README.rst to README
 recursive-include tests *.py
 
 include docs/Makefile docs/make.bat docs/conf.py
